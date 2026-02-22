@@ -157,6 +157,127 @@ def analyze_cobol_folder(folder_path):
     
     return G
 
+def calculate_total_steps(G, top_programs):
+    """
+    指定されたトッププログラムから到達可能なすべてのプログラムのステップ数を集計
+    
+    Args:
+        G: NetworkXグラフ
+        top_programs: トッププログラムのリスト（文字列または文字列のリスト）
+    
+    Returns:
+        dict: 集計結果
+    """
+    # 文字列が渡された場合はリストに変換
+    if isinstance(top_programs, str):
+        top_programs = [top_programs]
+    
+    # 大文字に正規化
+    top_programs = [prog.upper() for prog in top_programs]
+    
+    # 到達可能なノードを収集（BFS）
+    reachable_nodes = set()
+    for top_prog in top_programs:
+        if top_prog not in G.nodes:
+            print(f"警告: {top_prog} はグラフに存在しません。")
+            continue
+        
+        # BFSで到達可能なノードを探索
+        visited = set()
+        queue = [top_prog]
+        
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            reachable_nodes.add(current)
+            
+            # 後続ノードをキューに追加
+            for successor in G.successors(current):
+                if successor not in visited:
+                    queue.append(successor)
+    
+    # ステップ数を集計
+    total_steps = 0
+    program_details = []
+    
+    for node in sorted(reachable_nodes):
+        node_data = G.nodes[node]
+        title = node_data.get('title', '')
+        
+        # ステップ数を抽出
+        step_count = 0
+        for line in title.split('\n'):
+            if line.startswith("実ステップ数:"):
+                try:
+                    step_count = int(line.split(':')[1].strip().replace('行', ''))
+                except:
+                    pass
+        
+        # 料率TBL判定
+        is_rate_tbl = "料率TBL" in title
+        prog_type = "[料率TBL]" if is_rate_tbl else "[通常PGM]"
+        
+        # プログラム説明を抽出
+        description = ""
+        for line in title.split('\n'):
+            if line and not line.startswith("料率TBL") and not line.startswith("Program") and not line.startswith("実ステップ数"):
+                description = line
+                break
+        
+        program_details.append({
+            'name': node,
+            'type': prog_type,
+            'description': description,
+            'steps': step_count
+        })
+        
+        total_steps += step_count
+    
+    return {
+        'top_programs': top_programs,
+        'reachable_count': len(reachable_nodes),
+        'total_steps': total_steps,
+        'programs': program_details
+    }
+
+
+def export_step_count_report(G, top_programs, output_file="step_count_report.txt"):
+    """ステップ数集計レポートを出力"""
+    # 文字列が渡された場合はリストに変換
+    if isinstance(top_programs, str):
+        top_programs = [top_programs]
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write("# COBOL Step Count Report\n")
+        f.write(f"# トッププログラム: {', '.join(top_programs)}\n\n")
+        
+        # 各トッププログラムごとに集計
+        for top_prog in top_programs:
+            result = calculate_total_steps(G, top_prog)
+            
+            f.write(f"## [{top_prog}] からの到達範囲\n\n")
+            f.write(f"到達可能なプログラム数: {result['reachable_count']}\n")
+            f.write(f"合計ステップ数: {result['total_steps']}行\n\n")
+            
+            f.write("### プログラム詳細\n\n")
+            for prog in result['programs']:
+                f.write(f"{prog['type']} {prog['name']}")
+                if prog['description']:
+                    f.write(f" - {prog['description']}")
+                f.write(f" ({prog['steps']}行)\n")
+            
+            f.write(f"\n小計: {result['total_steps']}行\n\n")
+            f.write("-" * 60 + "\n\n")
+    
+    # コンソール出力
+    print(f"✅ ステップ数集計レポートを {output_file} に出力しました。")
+    for top_prog in top_programs:
+        result = calculate_total_steps(G, top_prog)
+        print(f"   [{top_prog}] 到達可能: {result['reachable_count']}プログラム, 合計: {result['total_steps']}行")
+
+
 def export_structure_data(G, output_file="call_graph_structure.txt"):
     """AI向けの構造データをテキストファイルに出力"""
     if len(G.nodes) == 0:
@@ -220,6 +341,18 @@ def visualize_offline_graph(G, output_html="offline_call_graph.html"):
 # 実行
 if __name__ == "__main__":
     TARGET_FOLDER = "./cobol_src"
+    
+    # ========================================
+    # ステップ数集計対象のトッププログラムを指定
+    # 例: TOP_PROGRAMS = "QB7000"
+    # 例: TOP_PROGRAMS = ["QB7000", "QB712345"]
+    # ========================================
+    TOP_PROGRAMS = ["QB7000"]  # ここを変更してください
+    
     graph = analyze_cobol_folder(TARGET_FOLDER)
     visualize_offline_graph(graph)
     export_structure_data(graph)
+    
+    # ステップ数集計レポート出力
+    if TOP_PROGRAMS:
+        export_step_count_report(graph, TOP_PROGRAMS)
