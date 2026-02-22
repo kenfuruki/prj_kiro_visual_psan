@@ -49,18 +49,34 @@ def analyze_cobol_folder(folder_path):
         return None
     
     # ノード追加用のヘルパー関数（料率TBL判定を行う）
-    def add_smart_node(graph, node_name, description=None):
+    def add_smart_node(graph, node_name, description=None, step_count=0):
         # 6文字 かつ 末尾2文字がアルファベット(A-Z) か判定
         is_rate_tbl = re.match(r'^[A-Z0-9]{4}[A-Z]{2}$', node_name)
         
-        # ツールチップの作成
-        if description:
-            if is_rate_tbl:
-                tooltip = f"料率TBL (VCOPY)\n{description}"
+        # ステップ数に応じてサイズを調整（対数スケール）
+        if step_count > 0:
+            import math
+            # 対数スケールでサイズを計算（最小20、最大80）
+            # 10ステップ = 20, 100ステップ = 40, 1000ステップ = 60, 2000ステップ = 66
+            base_size = 20
+            if step_count >= 10:
+                log_size = base_size + (math.log10(step_count) * 20)
+                size = min(int(log_size), 80)
             else:
-                tooltip = description
+                size = base_size
         else:
-            tooltip = "料率TBL (VCOPY)" if is_rate_tbl else "Program"
+            size = 20  # ステップ数不明の場合はデフォルト
+        
+        # ツールチップの作成
+        tooltip_parts = []
+        if is_rate_tbl:
+            tooltip_parts.append("料率TBL (VCOPY)")
+        if description:
+            tooltip_parts.append(description)
+        if step_count > 0:
+            tooltip_parts.append(f"実ステップ数: {step_count}行")
+        
+        tooltip = "\n".join(tooltip_parts) if tooltip_parts else ("料率TBL (VCOPY)" if is_rate_tbl else "Program")
         
         if is_rate_tbl:
             # 料率テーブルはオレンジ色の四角形（太枠）
@@ -68,7 +84,7 @@ def analyze_cobol_folder(folder_path):
                           title=tooltip, 
                           color="#FF9800", 
                           shape="box", 
-                          size=30,
+                          size=size,
                           borderWidth=4,
                           borderWidthSelected=6)
         else:
@@ -77,12 +93,14 @@ def analyze_cobol_folder(folder_path):
                           title=tooltip, 
                           color="#2196F3", 
                           shape="box", 
-                          size=20)
+                          size=size)
     
     for filepath in cbl_files:
         caller = os.path.basename(filepath).split('.')[0].upper()
         caller_description = None
+        caller_step_count = 0
         call_order = 1
+        in_procedure_division = False  # PROCEDURE DIVISION以降かどうかのフラグ
         
         try:
             # ファイルをUTF-8で読み込み（COBOLファイルがUTF-8の場合）
@@ -97,6 +115,14 @@ def analyze_cobol_folder(folder_path):
                 lines = content.splitlines(keepends=True)
                 
             for idx, line in enumerate(lines):
+                # PROCEDURE DIVISIONの検出
+                if re.search(r'PROCEDURE\s+DIVISION', line, re.IGNORECASE):
+                    in_procedure_division = True
+                
+                # 実ステップ数カウント（PROCEDURE DIVISION以降のみ、コメント行・空行を除く）
+                if in_procedure_division and len(line) > 6 and line[6] not in ['*', '/'] and line.strip():
+                    caller_step_count += 1
+                
                 # コメント行スキップ（PROGRAM-ID検出以外）
                 if len(line) > 6 and line[6] in ['*', '/']:
                     continue
@@ -107,13 +133,12 @@ def analyze_cobol_folder(folder_path):
                     caller = prog_match.group(1).upper()
                     # PROGRAM-ID直後のコメントから説明を抽出
                     caller_description = extract_program_description(lines, idx + 1)
-                    add_smart_node(G, caller, caller_description)
                 
                 # CALL文の特定
                 call_match = call_pattern.search(line)
                 if call_match:
                     callee = call_match.group(1).upper()
-                    # 呼び出し先のノードが未登録の場合のみ追加（説明なし）
+                    # 呼び出し先のノードが未登録の場合のみ追加（説明なし、ステップ数不明）
                     if callee not in G.nodes:
                         add_smart_node(G, callee)
                     
@@ -123,11 +148,41 @@ def analyze_cobol_folder(folder_path):
                               label=label_text, 
                               title=f"呼出順: {call_order}番目")
                     call_order += 1
+            
+            # ファイル解析完了後、呼び出し元ノードを追加（ステップ数付き）
+            add_smart_node(G, caller, caller_description, caller_step_count)
                     
         except Exception as e:
             print(f"エラー: {filepath} ({e})")
     
     return G
+
+def export_structure_data(G, output_file="call_graph_structure.txt"):
+    """AI向けの構造データをテキストファイルに出力"""
+    if len(G.nodes) == 0:
+        print("出力するデータがありません。")
+        return
+    
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write("# COBOL Call Graph Dependency List\n")
+        f.write("# Format: [Caller] --calls [order]--> [Callee]\n\n")
+        
+        # 呼び出し関係を1行ずつ出力
+        # 呼び出し元でソート
+        edges_sorted = sorted(G.edges(data=True), key=lambda x: (x[0], x[2].get('label', '')))
+        
+        for source, target, data in edges_sorted:
+            label = data.get('label', '').strip('[]')  # [1] -> 1
+            
+            # 呼び出し先が料率TBLかチェック
+            target_title = G.nodes[target].get('title', '')
+            is_rate_tbl = "料率TBL" in target_title
+            callee_suffix = " (RateTable)" if is_rate_tbl else ""
+            
+            f.write(f"- {source} --calls [{label}]--> {target}{callee_suffix}\n")
+    
+    print(f"✅ AI向け構造データを {output_file} に出力しました。")
+
 
 def visualize_offline_graph(G, output_html="offline_call_graph.html"):
     """完全オフライン対応のHTMLを生成"""
@@ -167,3 +222,4 @@ if __name__ == "__main__":
     TARGET_FOLDER = "./cobol_src"
     graph = analyze_cobol_folder(TARGET_FOLDER)
     visualize_offline_graph(graph)
+    export_structure_data(graph)

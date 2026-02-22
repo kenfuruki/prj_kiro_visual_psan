@@ -11,6 +11,7 @@ __pycache__/
 
 # 出力ファイル
 offline_call_graph.html
+call_graph_structure.txt
 
 # IDE設定（Kiro以外）
 .vscode/
