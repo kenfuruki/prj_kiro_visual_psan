@@ -15,6 +15,8 @@ pip install networkx pyvis
 - `analyze.py` : COBOLソース解析 + HTML生成スクリプト
 - `cobol_src/` : 解析対象の `.cbl` ファイル格納フォルダ
 - `offline_call_graph.html` : 出力される可視化HTML（完全オフライン対応）
+- `call_graph_structure.txt` : AI向けシンプルな依存関係リスト
+- `step_count_report.txt` : ステップ数集計レポート（TOP_PROGRAMS指定時）
 
 ## 実行コマンド
 
@@ -33,7 +35,8 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process
 
 ## 文字コード
 
-- COBOLソースの読み込み: Shift-JIS (cp932)、エラー時は `errors='replace'` でフォールバック
+- COBOLソースの読み込み: UTF-8優先、失敗時はShift-JIS (cp932) でフォールバック（`errors='replace'`）
+- HTML出力: UTF-8エンコーディング、`<meta charset="utf-8">` タグ追加、`errors='surrogatepass'` で出力
 
 ## オフライン対応
 
