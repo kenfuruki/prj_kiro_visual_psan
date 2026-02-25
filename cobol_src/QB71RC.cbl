@@ -7,7 +7,7 @@
        DATA DIVISION.
        WORKING-STORAGE SECTION.
       * VCOPY句で料率マスター値を展開
-           COPY VCOPY-RYOURITSU.
+           COPY VB73C100.
        LINKAGE SECTION.
        01  LK-計算基本項目.
            05  LK-基本保険料       PIC 9(7).

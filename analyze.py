@@ -4,10 +4,32 @@ import re
 import networkx as nx
 from pyvis.network import Network
 
-def analyze_cobol_folder(folder_path):
-    """COBOLソースフォルダを解析してグラフを生成"""
+def analyze_cobol_folder(folder_path, file_prefix_filter=None):
+    """COBOLソースフォルダを解析してグラフを生成
+    
+    Args:
+        folder_path: 解析対象フォルダのパス
+        file_prefix_filter: ファイル名の先頭N桁フィルタ（文字列、リスト、またはNoneで全ファイル処理）
+    """
     G = nx.DiGraph()
     cbl_files = glob.glob(os.path.join(folder_path, '*.cbl'))
+    
+    # ファイル名フィルタリング
+    if file_prefix_filter:
+        # 文字列の場合はリストに変換
+        if isinstance(file_prefix_filter, str):
+            file_prefix_filter = [file_prefix_filter]
+        
+        filtered_files = []
+        for filepath in cbl_files:
+            filename = os.path.basename(filepath).split('.')[0].upper()
+            # いずれかのプレフィックスに一致すればOK
+            for prefix in file_prefix_filter:
+                if filename.startswith(prefix.upper()):
+                    filtered_files.append(filepath)
+                    break
+        cbl_files = filtered_files
+        print(f"フィルタ {file_prefix_filter} 適用: {len(cbl_files)}件のファイルを処理対象にします。")
     
     if not cbl_files:
         print(f"警告: {folder_path} に .cbl ファイルが見つかりません。")
@@ -15,7 +37,16 @@ def analyze_cobol_folder(folder_path):
     
     # PROGRAM-IDとCALLを抽出する正規表現
     prog_id_pattern = re.compile(r"PROGRAM-ID\.\s+([A-Za-z0-9\-]+)", re.IGNORECASE)
-    call_pattern = re.compile(r"CALL\s+['\"]?([^\s\'\"]+)['\"]?", re.IGNORECASE)
+    # 静的CALL: 引用符で囲まれたプログラム名
+    static_call_pattern = re.compile(r'\bCALL\s+[\'"]([A-Za-z0-9\-]+)[\'"]', re.IGNORECASE)
+    # 動的CALL: 引用符なしの変数名
+    dynamic_call_pattern = re.compile(r'\bCALL\s+([A-Z][A-Z0-9\-]+)(?=\s+USING|\s*\.|\s*$)', re.IGNORECASE)
+    # WORKING-STORAGE SECTIONでのVALUE句
+    value_pattern = re.compile(r'^\s*\d+\s+([A-Z][A-Z0-9\-]+).*VALUE\s+[\'"]([A-Za-z0-9\-]+)[\'"]', re.IGNORECASE)
+    # MOVE文
+    move_pattern = re.compile(r'\bMOVE\s+[\'"]([A-Za-z0-9\-]+)[\'"]\s+TO\s+([A-Za-z0-9\-]+)', re.IGNORECASE)
+    # 料率TBL判定用: COPY VB7～ のパターン
+    vcopy_pattern = re.compile(r'\bCOPY\s+VB7', re.IGNORECASE)
     # 日付パターン（変更履歴除外用）
     date_pattern = re.compile(r'\d{4}[/-]\d{2}[/-]\d{2}|\d{8}')
     
@@ -49,9 +80,7 @@ def analyze_cobol_folder(folder_path):
         return None
     
     # ノード追加用のヘルパー関数（料率TBL判定を行う）
-    def add_smart_node(graph, node_name, description=None, step_count=0):
-        # 6文字 かつ 末尾2文字がアルファベット(A-Z) か判定
-        is_rate_tbl = re.match(r'^[A-Z0-9]{4}[A-Z]{2}$', node_name)
+    def add_smart_node(graph, node_name, description=None, step_count=0, is_rate_tbl=False):
         
         # ステップ数に応じてサイズを調整（対数スケール）
         if step_count > 0:
@@ -99,8 +128,11 @@ def analyze_cobol_folder(folder_path):
         caller = os.path.basename(filepath).split('.')[0].upper()
         caller_description = None
         caller_step_count = 0
+        caller_is_rate_tbl = False  # 料率TBLフラグ
         call_order = 1
+        in_working_storage = False  # WORKING-STORAGE SECTIONフラグ
         in_procedure_division = False  # PROCEDURE DIVISION以降かどうかのフラグ
+        var_values = {}  # 変数値追跡用辞書
         
         try:
             # ファイルをUTF-8で読み込み（COBOLファイルがUTF-8の場合）
@@ -115,17 +147,35 @@ def analyze_cobol_folder(folder_path):
                 lines = content.splitlines(keepends=True)
                 
             for idx, line in enumerate(lines):
-                # PROCEDURE DIVISIONの検出
-                if re.search(r'PROCEDURE\s+DIVISION', line, re.IGNORECASE):
+                # セクション検出
+                if re.search(r'WORKING-STORAGE\s+SECTION', line, re.IGNORECASE):
+                    in_working_storage = True
+                    in_procedure_division = False
+                elif re.search(r'LINKAGE\s+SECTION', line, re.IGNORECASE):
+                    in_working_storage = False
+                elif re.search(r'PROCEDURE\s+DIVISION', line, re.IGNORECASE):
+                    in_working_storage = False
                     in_procedure_division = True
+                
+                # COPY VB7～ パターンの検出（料率TBL判定）
+                if vcopy_pattern.search(line):
+                    caller_is_rate_tbl = True
                 
                 # 実ステップ数カウント（PROCEDURE DIVISION以降のみ、コメント行・空行を除く）
                 if in_procedure_division and len(line) > 6 and line[6] not in ['*', '/'] and line.strip():
                     caller_step_count += 1
                 
-                # コメント行スキップ（PROGRAM-ID検出以外）
+                # コメント行スキップ（以降の処理）
                 if len(line) > 6 and line[6] in ['*', '/']:
                     continue
+                
+                # WORKING-STORAGE SECTIONでのVALUE句
+                if in_working_storage:
+                    value_match = value_pattern.search(line)
+                    if value_match:
+                        var_name = value_match.group(1).upper()
+                        var_value = value_match.group(2).upper()
+                        var_values[var_name] = var_value
                 
                 # PROGRAM-IDの特定
                 prog_match = prog_id_pattern.search(line)
@@ -134,23 +184,58 @@ def analyze_cobol_folder(folder_path):
                     # PROGRAM-ID直後のコメントから説明を抽出
                     caller_description = extract_program_description(lines, idx + 1)
                 
-                # CALL文の特定
-                call_match = call_pattern.search(line)
-                if call_match:
-                    callee = call_match.group(1).upper()
-                    # 呼び出し先のノードが未登録の場合のみ追加（説明なし、ステップ数不明）
-                    if callee not in G.nodes:
-                        add_smart_node(G, callee)
+                # PROCEDURE DIVISIONでの処理
+                if in_procedure_division:
+                    # MOVE文（変数値の更新）
+                    move_match = move_pattern.search(line)
+                    if move_match:
+                        var_name = move_match.group(2).upper()
+                        var_value = move_match.group(1).upper()
+                        var_values[var_name] = var_value
                     
-                    # 順序付きエッジの追加
-                    label_text = f"[{call_order}]"
-                    G.add_edge(caller, callee, 
-                              label=label_text, 
-                              title=f"呼出順: {call_order}番目")
-                    call_order += 1
+                    # 静的CALL
+                    static_match = static_call_pattern.search(line)
+                    if static_match:
+                        callee = static_match.group(1).upper()
+                        # 呼び出し先のノードが未登録の場合のみ追加
+                        if callee not in G.nodes:
+                            add_smart_node(G, callee)
+                        
+                        # 順序付きエッジの追加（静的CALL）
+                        label_text = f"[{call_order}]"
+                        G.add_edge(caller, callee, 
+                                  label=label_text, 
+                                  title=f"呼出順: {call_order}番目",
+                                  color="gray")  # 静的CALLはグレー
+                        call_order += 1
+                    
+                    # 動的CALL
+                    elif dynamic_call_pattern.search(line):
+                        dynamic_match = dynamic_call_pattern.search(line)
+                        var_name = dynamic_match.group(1).upper()
+                        
+                        # 変数の値を解決
+                        if var_name in var_values:
+                            callee = var_values[var_name]
+                        else:
+                            callee = f"UNKNOWN-{var_name}"
+                        
+                        # 呼び出し先のノードが未登録の場合のみ追加
+                        if callee not in G.nodes:
+                            add_smart_node(G, callee)
+                        
+                        # 順序付きエッジの追加（動的CALL）
+                        label_text = f"[{call_order}]"
+                        G.add_edge(caller, callee, 
+                                  label=label_text, 
+                                  title=f"呼出順: {call_order}番目 (動的CALL)",
+                                  color="red",    # 動的CALLは赤色
+                                  dashes=True,    # 破線
+                                  width=2)        # 太め
+                        call_order += 1
             
-            # ファイル解析完了後、呼び出し元ノードを追加（ステップ数付き）
-            add_smart_node(G, caller, caller_description, caller_step_count)
+            # ファイル解析完了後、呼び出し元ノードを追加（ステップ数・料率TBLフラグ付き）
+            add_smart_node(G, caller, caller_description, caller_step_count, caller_is_rate_tbl)
                     
         except Exception as e:
             print(f"エラー: {filepath} ({e})")
@@ -343,13 +428,21 @@ if __name__ == "__main__":
     TARGET_FOLDER = "./cobol_src"
     
     # ========================================
+    # ファイル名フィルタ（先頭N桁指定、複数指定可能）
+    # 例: FILE_PREFIX_FILTER = None              # 全ファイル処理（デフォルト）
+    # 例: FILE_PREFIX_FILTER = "QB7"             # QB7で始まるファイルのみ処理
+    # 例: FILE_PREFIX_FILTER = ["QB70", "QB71"]  # QB70またはQB71で始まるファイルのみ処理
+    # ========================================
+    FILE_PREFIX_FILTER = None  # ここを変更してください
+    
+    # ========================================
     # ステップ数集計対象のトッププログラムを指定
     # 例: TOP_PROGRAMS = "QB7000"
     # 例: TOP_PROGRAMS = ["QB7000", "QB712345"]
     # ========================================
     TOP_PROGRAMS = ["QB7000"]  # ここを変更してください
     
-    graph = analyze_cobol_folder(TARGET_FOLDER)
+    graph = analyze_cobol_folder(TARGET_FOLDER, FILE_PREFIX_FILTER)
     visualize_offline_graph(graph)
     export_structure_data(graph)
     
